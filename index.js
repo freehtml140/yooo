@@ -1,20 +1,10 @@
-const {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  Events,
-  TextChannel,
-  ActivityType
-} = require('discord.js');
+import { Client, GatewayIntentBits, Partials, Events, TextChannel, ActivityType } from 'discord.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-// ENV VARIABLES (Railway)
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const TICKET_BOT_ID = '1325579039888511056';
-const VIP_TRADER_ROLE_ID = '1447166911174676593';
-
-if (!DISCORD_TOKEN) {
-  console.error('❌ ERROR: DISCORD_TOKEN is not set!');
-  process.exit(1);
+if (!process.env.DISCORD_TOKEN) {
+  console.warn("DISCORD_TOKEN not set, bot will not start.");
 }
 
 const client = new Client({
@@ -22,103 +12,245 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers
+    GatewayIntentBits.GuildMembers,
   ],
   partials: [Partials.Channel],
+  failIfNotExists: false,
 });
 
-const getWarningMessage = (userId) => `
-<@${userId}> **Please read carefully**
+const TICKET_BOT_ID = '1325579039888511056';
+const VIP_TRADER_ROLE_ID = '1447166911174676593';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const WARNED_CHANNELS_FILE = path.join(__dirname, 'warned_channels.json');
 
-**IF YOU RECEIVE A DM FROM YOUR "MIDDLEMAN" DURING THIS TICKET IT IS AN IMPOSTER.**
-DO NOT ANSWER unless it is a **PRIVATE SERVER LINK**.
+// Track channels where warning has been sent
+let warnedChannels = new Set<string>();
 
-Report suspicious activity to **@.lorked**
-
-⚠️ **DO NOT REPLY — STAY IN THIS TICKET**
-`;
-
-client.once(Events.ClientReady, (c) => {
-  console.log(`✅ Bot ready! Logged in as ${c.user.tag}`);
-  client.user.setActivity('for tickets', { type: ActivityType.Watching });
-});
-
-client.on(Events.MessageCreate, async (message) => {
+// Load warned channels from file
+const loadWarnedChannels = () => {
   try {
-    if (!message.guild) return;
-    if (message.author.bot) return;
+    if (fs.existsSync(WARNED_CHANNELS_FILE)) {
+      const data = fs.readFileSync(WARNED_CHANNELS_FILE, 'utf-8');
+      const channels = JSON.parse(data);
+      warnedChannels = new Set(channels);
+      console.log(`[Discord Bot] Loaded ${warnedChannels.size} previously warned channels`);
+    }
+  } catch (e) {
+    console.error('[Discord Bot] Failed to load warned channels:', (e as Error).message);
+  }
+};
 
-    const channel = message.channel;
-    if (!(channel instanceof TextChannel)) return;
-    if (!channel.name.includes('ticket')) return;
+// Save warned channels to file
+const saveWarnedChannels = () => {
+  try {
+    fs.writeFileSync(WARNED_CHANNELS_FILE, JSON.stringify(Array.from(warnedChannels), null, 2));
+  } catch (e) {
+    console.error('[Discord Bot] Failed to save warned channels:', (e as Error).message);
+  }
+};
 
-    // Trigger 1: Ticket bot creates ticket
-    if (message.author.id === TICKET_BOT_ID) {
-      if (!channel.ownerId) return;
+// Load on startup
+loadWarnedChannels();
 
-      await channel.send({
-        content: getWarningMessage(channel.ownerId),
-        allowedMentions: { parse: ['users'] }
-      });
+const getWarningMessage = (userId: string) => `<@${userId}> **Please read carefully**
+*IF YOU RECIEVE A DM FROM YOUR "MIDDLEMAN" DURING THIS TICKET ITS A IMPOSTER, DO NOT ANSWER! UNLESS ITS A PRIVATE SERVER LINK! REPORT ANY SUSPICOUS STUFF TO @.lorked*
 
-      console.log(`✅ Warning sent in #${channel.name}`);
+DO NOT REPLY STAY IN TICKET UNLESS ITS A PRIVATE SERVER LINK!`;
+
+client.once(Events.ClientReady, c => {
+  console.log(`[Discord Bot] Ready! Logged in as ${c.user?.tag}`);
+  console.log(`[Discord Bot] Monitoring ${c.guilds.cache.size} server(s)`);
+  
+  c.guilds.cache.forEach(guild => {
+    const ticketChannels = guild.channels.cache.filter(ch => ch.name && ch.name.toLowerCase().includes('ticket'));
+    console.log(`[Discord Bot] Server: ${guild.name} - Found ${ticketChannels.size} ticket channel(s)`);
+    ticketChannels.forEach(ch => {
+      console.log(`  - #${ch.name} (ID: ${ch.id})`);
+    });
+  });
+  
+  client.user?.setActivity('for tickets', { type: ActivityType.Watching });
+});
+
+client.on(Events.Error, error => {
+  console.error('[Discord Bot Error]', error);
+});
+
+client.on(Events.Warn, warning => {
+  console.warn('[Discord Bot Warning]', warning);
+});
+
+client.on(Events.Disconnect, () => {
+  console.log('[Discord Bot] Disconnected from Discord');
+});
+
+client.on(Events.InvalidationCreate, () => {
+  console.log('[Discord Bot] Session invalidated, will reconnect...');
+});
+
+client.on(Events.MessageCreate, async message => {
+  try {
+    // Skip DMs
+    if (!message.guild) {
       return;
     }
 
-    // Trigger 2: VIP Trader types
-    const member = message.member;
-    if (!member) return;
-
-    if (member.roles.cache.has(VIP_TRADER_ROLE_ID)) {
-      if (!channel.ownerId) return;
-
-      await message.reply({
-        content: getWarningMessage(channel.ownerId),
-        allowedMentions: { parse: ['users'], repliedUser: false }
-      });
-
-      console.log(`✅ VIP trader warning in #${channel.name}`);
+    // Ignore messages from this bot itself to prevent loops
+    if (message.author.id === client.user?.id) {
+      return;
     }
-  } catch (err) {
-    console.error('❌ Message handler error:', err);
+
+    const channel = message.channel;
+    const isTicketChannel = channel instanceof TextChannel && channel.name.toLowerCase().includes('ticket');
+
+    // Log all messages in ticket channels for debugging
+    if (isTicketChannel) {
+      console.log(`[Discord Bot] Message in #${(channel as TextChannel).name} from ${message.author.tag}: "${message.content.substring(0, 50)}..."`);
+    }
+
+    // Helper function to get ticket creator user ID
+    const getTicketCreatorId = async (ticketChannel: TextChannel): Promise<string | null> => {
+      // Try to get owner ID
+      if (ticketChannel.ownerId) {
+        return ticketChannel.ownerId;
+      }
+
+      // Fetch channel to refresh data
+      const fetchedChannel = await ticketChannel.guild.channels.fetch(ticketChannel.id) as TextChannel;
+      if (fetchedChannel?.ownerId) {
+        return fetchedChannel.ownerId;
+      }
+
+      // Try to extract from channel topic/subject
+      if (ticketChannel.topic && ticketChannel.topic.includes('<@')) {
+        const match = ticketChannel.topic.match(/<@!?(\d+)>/);
+        if (match) return match[1];
+      }
+
+      // Try to find from first message
+      try {
+        const firstMessage = await ticketChannel.messages.fetch({ limit: 100, cache: false });
+        const creatorMsg = firstMessage.reverse().find(m => !m.author.bot);
+        if (creatorMsg) return creatorMsg.author.id;
+      } catch (e) {
+        console.log("[Discord Bot] Could not fetch messages to find creator");
+      }
+
+      return null;
+    };
+
+    // Trigger 1: Ticket Bot creates a ticket (sends a message)
+    if (message.author.id === TICKET_BOT_ID && isTicketChannel) {
+      const textChannel = channel as TextChannel;
+      // Only send warning once per channel
+      if (!warnedChannels.has(textChannel.id)) {
+        try {
+          const owner = await getTicketCreatorId(textChannel);
+          console.log(`[Discord Bot] Ticket bot message detected. Channel owner: ${owner}`);
+          if (owner) {
+            const warningMessage = getWarningMessage(owner);
+            await message.channel.send({
+              content: warningMessage,
+              allowedMentions: { parse: ['users'] }
+            });
+            warnedChannels.add(textChannel.id);
+            saveWarnedChannels();
+            console.log(`[Discord Bot] ✅ Sent ticket warning in #${textChannel.name} to ${owner}`);
+          } else {
+            console.log(`[Discord Bot] ⚠️  Could not find ticket creator in #${textChannel.name}`);
+          }
+        } catch (e) {
+          console.error("[Discord Bot] Failed to send ticket creation warning:", (e as Error).message);
+        }
+      }
+      return;
+    }
+
+    // Trigger 2: VIP Trader types in ticket
+    if (isTicketChannel) {
+      const textChannel = channel as TextChannel;
+      // Only send warning once per channel
+      if (!warnedChannels.has(textChannel.id)) {
+        const member = message.member;
+        if (!member) {
+          console.log(`[Discord Bot] Could not get member info for ${message.author.tag}`);
+          return;
+        }
+
+        const hasVipRole = member.roles.cache.has(VIP_TRADER_ROLE_ID);
+        if (hasVipRole) {
+          console.log(`[Discord Bot] VIP Trader detected: ${member.user.tag}`);
+          try {
+            const owner = await getTicketCreatorId(textChannel);
+            if (owner) {
+              const warningMessage = getWarningMessage(owner);
+              await message.reply({
+                content: warningMessage,
+                allowedMentions: { parse: ['users'], repliedUser: false }
+              });
+              warnedChannels.add(textChannel.id);
+              saveWarnedChannels();
+              console.log(`[Discord Bot] ✅ Replied to VIP trader ${member.user.tag}, pinged creator ${owner}`);
+            } else {
+              console.log(`[Discord Bot] ⚠️  Could not find ticket creator to ping`);
+            }
+          } catch (e) {
+            console.error("[Discord Bot] Failed to reply to VIP trader:", (e as Error).message);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error("[Discord Bot] Unexpected error in message handler:", (e as Error).message);
   }
 });
 
-// Login with retry protection
 let loginAttempts = 0;
 const MAX_LOGIN_ATTEMPTS = 5;
 
-async function startBot() {
-  try {
-    loginAttempts++;
-    console.log(`🔄 Login attempt ${loginAttempts}/${MAX_LOGIN_ATTEMPTS}`);
-    await client.login(DISCORD_TOKEN);
-  } catch (err) {
-    console.error('❌ Login failed:', err.message);
-
-    if (loginAttempts >= MAX_LOGIN_ATTEMPTS) {
-      console.error('❌ Max login attempts reached. Exiting.');
-      process.exit(1);
-    }
-
-    const delay = Math.min(1000 * 2 ** loginAttempts, 60000);
-    setTimeout(startBot, delay);
+export function setupBot() {
+  if (!process.env.DISCORD_TOKEN) {
+    console.log("[Discord Bot] Skipping bot login: DISCORD_TOKEN not found in environment variables.");
+    return;
   }
+
+  const attemptLogin = async () => {
+    try {
+      if (loginAttempts >= MAX_LOGIN_ATTEMPTS) {
+        console.error("[Discord Bot] Max login attempts reached. Giving up.");
+        return;
+      }
+
+      loginAttempts++;
+      console.log(`[Discord Bot] Login attempt ${loginAttempts}/${MAX_LOGIN_ATTEMPTS}...`);
+      await client.login(process.env.DISCORD_TOKEN);
+      loginAttempts = 0; // Reset on successful login
+    } catch (err) {
+      console.error(`[Discord Bot] Login failed (attempt ${loginAttempts}/${MAX_LOGIN_ATTEMPTS}):`, err);
+      
+      if (loginAttempts < MAX_LOGIN_ATTEMPTS) {
+        const delay = Math.min(1000 * Math.pow(2, loginAttempts - 1), 60000); // Exponential backoff, max 60s
+        console.log(`[Discord Bot] Retrying in ${delay}ms...`);
+        setTimeout(attemptLogin, delay);
+      }
+    }
+  };
+
+  attemptLogin();
 }
 
 // Graceful shutdown
 process.on('SIGINT', () => {
-  console.log('👋 Shutting down...');
+  console.log('[Discord Bot] Graceful shutdown initiated...');
   client.destroy();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-  console.log('👋 Shutting down...');
+  console.log('[Discord Bot] Graceful shutdown initiated...');
   client.destroy();
   process.exit(0);
 });
-
-startBot();
 
 client.login(process.env.DISCORD_TOKEN);
