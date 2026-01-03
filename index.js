@@ -50,7 +50,7 @@ const saveWarnedChannels = () => {
 // Load on startup
 loadWarnedChannels();
 
-const getWarningMessage = (userId) => `<@${userId}> **Please read carefully**
+const getWarningMessage = (userId) => ` **Please read carefully**
 *IF YOU RECEIVE A DM FROM YOUR "MIDDLEMAN" DURING THIS TICKET ITS A IMPOSTER, DO NOT ANSWER! UNLESS ITS A PRIVATE SERVER LINK! REPORT ANY SUSPICIOUS STUFF TO THE OWNER*
 
 DO NOT REPLY STAY IN TICKET UNLESS ITS A PRIVATE SERVER LINK!`;
